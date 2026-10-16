@@ -1720,6 +1720,22 @@ h1,h2,h3,h4,.nav-brand-name,.card-title,.pg-title,.auth-title,.ft-brand h3,.team
 @media(prefers-reduced-motion:reduce){.testimonial-track{animation:none;transform:none}}
 
 </style>
+
+<style id="shipment-location-autocomplete-styles">
+.location-autocomplete { position: relative; min-width: 0; }
+.location-suggestions { position: absolute; top: calc(100% - 18px); left: 0; right: 0; z-index: 9500; max-height: 250px; overflow-y: auto; background: #fff; border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 30px rgba(10,22,40,.16); }
+.location-suggestions[hidden] { display: none; }
+.location-suggestion { width: 100%; display: flex; align-items: flex-start; gap: 10px; padding: 11px 13px; border: 0; border-bottom: 1px solid #edf0f5; background: #fff; color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+.location-suggestion:last-child { border-bottom: 0; }
+.location-suggestion:hover, .location-suggestion:focus { background: #f2f6fc; outline: none; }
+.location-suggestion i { color: var(--primary); margin-top: 3px; }
+.location-suggestion span { font-size: 13px; line-height: 1.45; }
+.location-suggestion small { display: block; color: var(--text-3); font-size: 11px; margin-top: 2px; }
+.location-help { color: var(--text-3); font-size: 11px; margin-top: 5px; }
+.location-help.selected { color: #16803d; }
+.location-help.error { color: var(--red); }
+</style>
+
 </head>
 <body>
 
@@ -2341,13 +2357,10 @@ h1,h2,h3,h4,.nav-brand-name,.card-title,.pg-title,.auth-title,.ft-brand h3,.team
           <!-- Route -->
           <div class="f-sec"><i class="fa-solid fa-route"></i> Route Information</div>
           <div class="f-row">
-            <div class="fg"><label class="fl">Origin Name *</label><input type="text" id="f-on" class="fi" placeholder="New York, USA"/></div>
-            <div class="fg"><label class="fl">Destination Name *</label><input type="text" id="f-dn" class="fi" placeholder="Los Angeles, USA"/></div>
+            <div class="fg location-autocomplete"><label class="fl" for="f-on">Origin City / State *</label><input type="text" id="f-on" class="fi" placeholder="Start typing a city, state, or country" autocomplete="off" aria-autocomplete="list" aria-expanded="false" aria-controls="f-on-suggestions"/><div class="location-suggestions" id="f-on-suggestions" role="listbox" hidden></div><div class="location-help" id="f-on-help">Select a location from the suggestions.</div></div>
+            <div class="fg location-autocomplete"><label class="fl" for="f-dn">Destination City / State *</label><input type="text" id="f-dn" class="fi" placeholder="Start typing a city, state, or country" autocomplete="off" aria-autocomplete="list" aria-expanded="false" aria-controls="f-dn-suggestions"/><div class="location-suggestions" id="f-dn-suggestions" role="listbox" hidden></div><div class="location-help" id="f-dn-help">Select a location from the suggestions.</div></div>
           </div>
-          <div class="f-row">
-            <div class="fg"><label class="fl">Origin Lat, Lng *</label><input type="text" id="f-oc" class="fi" placeholder="40.7128, -74.0060"/></div>
-            <div class="fg"><label class="fl">Destination Lat, Lng *</label><input type="text" id="f-dc" class="fi" placeholder="34.0522, -118.2437"/></div>
-          </div>
+          <input type="hidden" id="f-oc"/><input type="hidden" id="f-dc"/>
 
           <hr class="divider"/>
           <!-- Current Location -->
@@ -3303,9 +3316,9 @@ function validateForm() {
   if (document.getElementById('f-status').value === 'On Hold' && !document.getElementById('f-hold').value.trim())
     return 'Hold reason is required when status is On Hold.';
   if (!parseCoords(document.getElementById('f-oc').value))
-    return 'Origin coordinates must be: lat, lng (e.g. 40.71, -74.00)';
+    return 'Please select an origin location from the suggestions.';
   if (!parseCoords(document.getElementById('f-dc').value))
-    return 'Destination coordinates must be: lat, lng';
+    return 'Please select a destination location from the suggestions.';
   return null;
 }
 async function submitShipment() {
@@ -3776,5 +3789,138 @@ s0.parentNode.insertBefore(s1,s0);
 })();
 </script>
 <!--End of Tawk.to Script-->
+
+<script id="shipment-location-autocomplete">
+(function () {
+  const timers = {};
+  const requests = {};
+  const selectedLocations = {};
+
+  function placeLabel(properties) {
+    const p = properties || {};
+    const primary = p.name || p.city || p.town || p.village || p.hamlet || p.county || p.state || p.country || 'Unknown location';
+    const parts = [primary, p.state, p.country].filter(Boolean);
+    return parts.filter((part, index) => parts.indexOf(part) === index).join(', ');
+  }
+
+  function placeSubLabel(properties) {
+    const p = properties || {};
+    return [p.type && p.type !== ' locality' ? p.type.replace(/_/g, ' ') : '', p.county, p.state, p.country]
+      .filter(Boolean).filter((part, index, arr) => arr.indexOf(part) === index).join(' · ');
+  }
+
+  function closeSuggestions(id) {
+    const box = document.getElementById(id + '-suggestions');
+    const input = document.getElementById(id);
+    if (box) { box.hidden = true; box.replaceChildren(); }
+    if (input) input.setAttribute('aria-expanded', 'false');
+  }
+
+  function showMessage(id, message, kind) {
+    const el = document.getElementById(id + '-help');
+    if (!el) return;
+    el.textContent = message;
+    el.className = 'location-help' + (kind ? ' ' + kind : '');
+  }
+
+  function chooseLocation(id, coordsId, feature) {
+    const input = document.getElementById(id);
+    const coords = document.getElementById(coordsId);
+    const coordinates = feature && feature.geometry && feature.geometry.coordinates;
+    if (!coordinates || coordinates.length < 2 || !Number.isFinite(Number(coordinates[0])) || !Number.isFinite(Number(coordinates[1]))) {
+      showMessage(id, 'Could not read coordinates for that location. Please choose another result.', 'error');
+      return;
+    }
+    const label = placeLabel(feature.properties);
+    input.value = label;
+    // Photon returns [longitude, latitude]; this app stores latitude first.
+    coords.value = Number(coordinates[1]) + ', ' + Number(coordinates[0]);
+    selectedLocations[id] = label;
+    closeSuggestions(id);
+    showMessage(id, 'Location selected. Coordinates added automatically.', 'selected');
+  }
+
+  function renderSuggestions(id, coordsId, features) {
+    const box = document.getElementById(id + '-suggestions');
+    const input = document.getElementById(id);
+    if (!box || !input) return;
+    box.replaceChildren();
+    if (!features.length) {
+      const empty = document.createElement('div');
+      empty.className = 'location-suggestion';
+      empty.innerHTML = '<i class="fa-solid fa-circle-info"></i><span>No matching locations found. Try adding the country name.</span>';
+      box.appendChild(empty);
+    } else {
+      features.forEach(feature => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'location-suggestion';
+        button.setAttribute('role', 'option');
+        const icon = document.createElement('i');
+        icon.className = 'fa-solid fa-location-dot';
+        const text = document.createElement('span');
+        text.textContent = placeLabel(feature.properties);
+        const sub = document.createElement('small');
+        sub.textContent = placeSubLabel(feature.properties);
+        text.appendChild(sub);
+        button.append(icon, text);
+        button.addEventListener('click', () => chooseLocation(id, coordsId, feature));
+        box.appendChild(button);
+      });
+    }
+    box.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+  }
+
+  function attachAutocomplete(id, coordsId) {
+    const input = document.getElementById(id);
+    const coords = document.getElementById(coordsId);
+    if (!input || !coords) return;
+    input.addEventListener('input', () => {
+      const query = input.value.trim();
+      coords.value = '';
+      delete selectedLocations[id];
+      showMessage(id, 'Choose a suggestion to set the coordinates automatically.', '');
+      if (timers[id]) clearTimeout(timers[id]);
+      if (requests[id]) requests[id].abort();
+      closeSuggestions(id);
+      if (query.length < 2) return;
+      timers[id] = setTimeout(async () => {
+        const controller = new AbortController();
+        requests[id] = controller;
+        try {
+          const url = 'https://photon.komoot.io/api/?q=' + encodeURIComponent(query) + '&limit=6&lang=en';
+          const response = await fetch(url, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
+          if (!response.ok) throw new Error('Location search unavailable');
+          const data = await response.json();
+          if (input.value.trim() === query) renderSuggestions(id, coordsId, Array.isArray(data.features) ? data.features : []);
+        } catch (error) {
+          if (error.name !== 'AbortError' && input.value.trim() === query) {
+            closeSuggestions(id);
+            showMessage(id, 'Location suggestions are temporarily unavailable. Check your connection and try again.', 'error');
+          }
+        }
+      }, 350);
+    });
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Escape') closeSuggestions(id);
+    });
+    input.addEventListener('change', () => {
+      if (selectedLocations[id] !== input.value.trim()) coords.value = '';
+    });
+  }
+
+  document.addEventListener('click', event => {
+    ['f-on', 'f-dn'].forEach(id => {
+      const container = document.getElementById(id)?.closest('.location-autocomplete');
+      if (container && !container.contains(event.target)) closeSuggestions(id);
+    });
+  });
+
+  attachAutocomplete('f-on', 'f-oc');
+  attachAutocomplete('f-dn', 'f-dc');
+})();
+</script>
+
 </body>
 </html>
